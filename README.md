@@ -4,7 +4,7 @@ A tool for making an X (Twitter) bot that posts scheduled tweets using Google Sp
 
 The `.gs` files in this repository are the underlying GAS code for the dev version.
 
-Note: This bot uses Twitters 2.0 API and will only occassionally be updated.
+Note: This bot currently uses Twitters 2.0 API, supports only tweets, replies, and quote tweets without media and will only occassionally be updated. (Due to X (twitter) rules retweets without a comment are not supported.)
 
 ## Spreadsheet Releases
 
