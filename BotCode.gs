@@ -1,14 +1,14 @@
 /* 
 
-   A Spreadsheet-powered Twitter Bot Engine, version 0.6.5, May 2020
+   A Spreadsheet-powered Twitter Bot Engine, version 0.7.0, October 2023
    
-   by Zach Whalen (@zachwhalen, zachwhalen.net)
+   by antgiant & Zach Whalen (@zachwhalen, zachwhalen.net)
    
    This code powers the backend for a front-end in a google spreadsheet. If somehow 
    you've arrived at this code without the spreadsheet, start by making a copy of that 
    sheet by visiting this URL:
    
-     bit.ly/...
+     https://github.com/antgiant/Google-Sheets-Twitter-Bot
    
    All of the setup instructions are available in the sheet or (with pictures!) in 
    this blog post:
@@ -56,14 +56,14 @@ function updateSettings() {
   var ss = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Settings").getRange("b4:b15").getValues();
   var scriptProperties = PropertiesService.getScriptProperties();
 
-  if (ss[0].toString() === 'scheduled' && ss[1].toString() == "auto") { //Both Constructor & Timing must match.
+  if (ss[1].toString() == "auto") { //Timing must match.
     scriptProperties.setProperty('isAutoTiming', true);
   } else {
     scriptProperties.setProperty('isAutoTiming', false);
   }
 
   scriptProperties.
-    setProperty('constructor', ss[0].toString()).
+  //  setProperty('constructor', ss[0].toString()).
     setProperty('timing', convertTimingtoMinutes(ss[1].toString())).
     setProperty('min', ss[2].toString()).
     setProperty('max', ss[3].toString()).
@@ -102,27 +102,6 @@ function updateSettings() {
 
 }
 
-function everyRotate() {
-
-  var everySheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Every");
-  var lastRow = everySheet.getLastRow();
-  // var nextLastRow = lastRow + 1;
-
-
-  var indexColumn = everySheet.getRange("a" + 1 + ":a" + lastRow).getValues();
-
-  var activeRow = 3;
-  for (var i = 0; i < lastRow; i++) {
-    if (indexColumn[i][0].match(/next/i)) {
-      activeRow = i + 1;
-    }
-  }
-  var nextRow = activeRow + 1;
-  everySheet.getRange("a" + activeRow).setValue("");
-  everySheet.getRange("a" + nextRow).setValue("next-->");
-
-}
-
 function logScheduledTweet(rowID, success, response) {
   var display = "";
   var scheduledSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('scheduled');
@@ -136,35 +115,100 @@ function logScheduledTweet(rowID, success, response) {
   scheduledSheet.getRange("c" + rowID + ":c" + rowID).setValue(display);
 }
 
-function getTweets(count, preview) {
-  var properties = PropertiesService.getScriptProperties().getProperties();
-
-  switch (properties.constructor) {
-    case "markov":
-      var textFunction = getMarkovText;
-      break;
-    case "rows":
-      var textFunction = getRowSelectText;
-      break;
-    case "columns":
-      var textFunction = getColumnSelectText;
-      break;
-    case "_ebooks":
-      var textFunction = getEbooksText;
-      break;
-    case "every":
-      var textFunction = getEveryText;
-      break;
-    case "scheduled":
-      var textFunction = getScheduledText;
-      break;
-    case "x + y":
-      var textFunction = getXYText;
-      break;
-    default:
-      Logger.log("I don't know what happened, but I can't figure out what sort of text to generate.");
+function getScheduledText(count, preview) {
+  var p = PropertiesService.getScriptProperties().getProperties();
+  var tweets = new Array();
+  if (typeof count !== 'undefined') {
+    var quota = count;
+  } else {
+    var quota = 1;
   }
-  return textFunction(count, preview);
+
+  var scheduledSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('scheduled');
+  var scheduledData = scheduledSheet.getRange("a" + 4 + ":g" + scheduledSheet.getLastRow()).getValues();
+  var lastRow = scheduledData.length;
+  var afterFudgeFactor;
+  if (p.isAutoTiming) {
+    afterFudgeFactor = (35/60.0)*60000;                     //When on "auto schedule" tweets will not be posted more 30 Seconds before scheduled time.
+  } else {
+    afterFudgeFactor = ((p.timing/2.0) + (5/60.0))*60000;   //Half for window size. Plus 5 seconds to account for 1 second variation with buffer.
+  }
+
+  var now = new Date();
+  var beforeNow = new Date(p.lastRunTime);
+  var afterNow = new Date(now.getTime() + afterFudgeFactor);
+
+  //Wipe out wrong "Actual Tweet Time"
+  for (i = 0; i < lastRow; i++) {
+    scheduledData[i].push(i + 4); //Row ID
+    if (scheduledData[i][2] != "" &&
+        (scheduledData[i][3] > afterNow             //"Desired Tweet Time" is in the future
+        || scheduledData[i][2] > now)               //"Actual Tweet Time" is in the future
+    ) {
+      scheduledData[i][2] = "";
+      scheduledSheet.getRange("b" + scheduledData[i][7]+":c" + scheduledData[i][7]).setValues([["",""]]);
+    }
+    if (scheduledData[i][2] == "next-->") {         //Erase Next Pointer as it will be reset later
+      scheduledData[i][2] = "";
+      scheduledSheet.getRange("b" + scheduledData[i][7]+":c" + scheduledData[i][7]).setValues([["",""]]);
+    }
+    if (scheduledData[i][3] < beforeNow             //Erase tweets that are in the past
+        || scheduledData[i][2] > 0                  //Erase tweets that are already sent
+        || scheduledData[i][2] == "Duplicate (Race Condition?)"
+        || scheduledData[i][2] == "Error") {        //Erase Error Tweets
+      scheduledData[i][2] = "";
+      scheduledData[i][3] = "";
+      scheduledData[i][4] = "";
+    }
+    if (scheduledData[i][5] < 1000000 && scheduledData[i][5] > 0) {
+      scheduledData[i][5] = scheduledData[scheduledData[i][5] - 1][1];
+    }
+    if (scheduledData[i][6] < 1000000 && scheduledData[i][6] > 0) {
+      scheduledData[i][6] = scheduledData[scheduledData[i][6] - 1][1];
+    }
+  }
+
+  //Sort tweets by time
+  scheduledData.sort(function(a,b){ return (a[3] == ""?1:(b[3] == ""?-1:a[3] - b[3])); });
+
+  //Find tweets to return
+  var found = 0;
+  var foundPreview = false;
+  for (i = 0; i < lastRow; i++) {
+    if (scheduledData[i][4] != "" || scheduledData[i][5] > 0) {     //Tweet is not empty or a ReTweet without comment
+      if (found++ < quota) {                                        //We don't have too many tweets already
+        if (preview) {
+          tweets.push(scheduledData[i][4]);                         //Preview gets the tweets only. (No row number)
+          if (!foundPreview) {                                      //Previewing so first result is also next to be tweeted.
+            scheduledSheet.getRange("c" + scheduledData[i][7]).setValue("next-->");
+            foundPreview = true;
+          }
+        } else if (scheduledData[i][3] < afterNow) {                //Tweet is not to far in the future
+          tweets.push([scheduledData[i][4],                         //Not previewing
+                       scheduledData[i][7],                         //  Send row number that way "Actual Tweet Time" can be set.
+                       scheduledData[i][5],                         //  Send retweet Twitter ID
+                       scheduledData[i][6]                          //  Send reply Twitter ID
+                      ]);
+          scheduledSheet.getRange("c" + scheduledData[i][7]).setValue("next-->");
+        } else if (!foundPreview) {                                 //Not previewing, tweet is in the future, and next marker not set 
+          scheduledSheet.getRange("c" + scheduledData[i][7]).setValue("next-->");
+          foundPreview = true;
+          if (p.isAutoTiming == "true"                              //Auto updating timing is turned on
+              && p.isScheduledPosting == "true") {                  //Currently in unattended posting mode.
+            tweets.push([scheduledData[i][3],'Schedule']);          //Since there was nothing to tweet in this time block update timing frequency.
+          }
+        }
+      } else if (!foundPreview) {                                   //Next tweet is after quota filled up.
+          scheduledSheet.getRange("c" + scheduledData[i][7]).setValue("next-->");
+          foundPreview = true;
+          if (p.isAutoTiming == "true"                              //Auto updating timing is turned on
+            && p.isScheduledPosting == "true") {                    //Currently in unattended posting mode.
+          tweets.push([scheduledData[i][3],'Schedule']);            //We tweeted but to be safe we still need to update the timing frequency.
+        }
+      }
+    }
+  }
+  return tweets;
 }
 
 function preview() {
@@ -176,7 +220,7 @@ function preview() {
   previewSheet.getRange('b4:b20').setValue(" ");
   SpreadsheetApp.getActiveSpreadsheet().setActiveSheet(previewSheet);
 
-  var tweets = getTweets(16, true);
+  var tweets = getScheduledText(16, true);
 
   for (var p = 0; p < tweets.length; p++) {
     var offset = p + 5;
@@ -367,15 +411,6 @@ function resetTiming() {
 function onOpen() {
 
   var ui = SpreadsheetApp.getUi();
-  //  ui.createMenu('Bot')
-  //      .addItem('Generate Preview', 'preview')
-  //      .addSeparator()
-  //      .addItem('Send a Test Tweet', 'generateSingleTweet')
-  //      .addItem('Revoke Twitter Authorization', 'authorizationRevoke')
-  //      .addSeparator()
-  //      .addItem('Start Posting Tweets', 'setTiming')
-  //      .addItem('Stop Posting Tweets', 'clearTiming')
-  //      .addToUi();
 
   ui.createMenu('Bot')
     .addItem('Authorize with Twitter', 'generateSingleTweet')
@@ -513,27 +548,24 @@ function generateSingleTweet() {
   var tempID;
   var retweetIDs;
   var replyIDs;
-  if (properties.constructor == "scheduled") {
-    var tempArray = getTweets(1, false); //1 tweet per block of time
-    if (typeof tempArray == 'undefined' || tempArray.length < 1) {
-      doLog("","Scheduled Tweet: There is nothing to Tweet now","Nothing");
-      Logger.log("Scheduled Tweet: Nothing to tweet in this time block");
-      //Nothing happened so it is safe to move the lastRunTime forward.
-      scriptProperties.setProperty('lastRunTime', now.toJSON());
-      return;
-    }
-    temp = tempArray.map(function(value,index) { return value[0]; });
-    tempID = tempArray.map(function(value,index) { return value[1]; });
-    retweetIDs = tempArray.map(function(value,index) { return value[2]; });
-    replyIDs = tempArray.map(function(value,index) { return value[3]; });
-    if (tempID[0] === 'Schedule') {
-      doLog("","Scheduled Tweet: There is nothing to Tweet now","Nothing");
-      Logger.log("Scheduled Tweet: Nothing to tweet in this time block");
-      //Nothing happened so it is safe to move the lastRunTime forward.
-      scriptProperties.setProperty('lastRunTime', now.toJSON());
-    }
-  } else {
-    temp = getTweets(1, false);
+
+  var tempArray = getScheduledText(1, false); //1 tweet per block of time
+  if (typeof tempArray == 'undefined' || tempArray.length < 1) {
+    doLog("","Scheduled Tweet: There is nothing to Tweet now","Nothing");
+    Logger.log("Scheduled Tweet: Nothing to tweet in this time block");
+    //Nothing happened so it is safe to move the lastRunTime forward.
+    scriptProperties.setProperty('lastRunTime', now.toJSON());
+    return;
+  }
+  temp = tempArray.map(function(value,index) { return value[0]; });
+  tempID = tempArray.map(function(value,index) { return value[1]; });
+  retweetIDs = tempArray.map(function(value,index) { return value[2]; });
+  replyIDs = tempArray.map(function(value,index) { return value[3]; });
+  if (tempID[0] === 'Schedule') {
+    doLog("","Scheduled Tweet: There is nothing to Tweet now","Nothing");
+    Logger.log("Scheduled Tweet: Nothing to tweet in this time block");
+    //Nothing happened so it is safe to move the lastRunTime forward.
+    scriptProperties.setProperty('lastRunTime', now.toJSON());
   }
   var tweet;
   for (i = 0; i < temp.length; i++) {
@@ -553,38 +585,25 @@ function generateSingleTweet() {
       while (tweet.match(/ {2}/g)) {
         tweet = tweet.replace(/ {2}/, ' ');
       }
-      if (properties.constructor == "scheduled") {
-        try {
-          doTweet(tweet, tempID[i], retweetIDs[i], replyIDs[i]);
-        } catch (err) {
-          if (err == "Unauthorized") {
-            doLog("Authorization attempted", "", 'Notice');
-            Logger.log("Authorization attempted");
-          } else {
-            doLog("Error Actually Sending Tweet (Row #"+tempID[i]+")", tweet, 'Error');
-            Logger.log("Error Actually Sending Tweet (Row #"+tempID[i]+")");
-            if (properties.isAutoTiming == "true"                              //Auto updating timing is turned on
-                && properties.isScheduledPosting == "true") {                  //Currently in unattended posting mode.
-              //Something went wrong so be sure to try again as soon as possible.
-              setTiming();
-            }
+
+      try {
+        doTweet(tweet, tempID[i], retweetIDs[i], replyIDs[i]);
+      } catch (err) {
+        if (err == "Unauthorized") {
+          doLog("Authorization attempted", "", 'Notice');
+          Logger.log("Authorization attempted");
+        } else {
+          doLog("Error Actually Sending Tweet (Row #"+tempID[i]+")", tweet, 'Error');
+          Logger.log("Error Actually Sending Tweet (Row #"+tempID[i]+")");
+          if (properties.isAutoTiming == "true"                              //Auto updating timing is turned on
+              && properties.isScheduledPosting == "true") {                  //Currently in unattended posting mode.
+            //Something went wrong so be sure to try again as soon as possible.
+            setTiming();
           }
-          return; //Exit. Do not contiue to try other tweets (or to record sucessful tweet)
         }
-      }else{
-        try {
-          doTweet(tweet);
-        } catch (err) {
-          if (err == "Unauthorized") {
-            doLog("Authorization attempted", "", 'Notice');
-            Logger.log("Authorization attempted");
-          } else {
-            doLog("Error Actually Sending Tweet", tweet, 'Error');
-            Logger.log("Error Actually Sending Tweet ("+tweet+")");
-          }
-          return; //Exit. Do not contiue to try other tweets (or to record sucessful tweet)
-        }
-      } 
+        return; //Exit. Do not contiue to try other tweets (or to record sucessful tweet)
+      }
+
     } else if (tempID[i] === 'Schedule') {
       setTiming(tweet);
     } else {
@@ -671,11 +690,7 @@ function doTweet(tweet, tweetID, retweetID, replyID) {
       Logger.log(result.getContentText());
       var response = JSON.parse(result.getContentText());
 
-      if (response.data.id && properties.constructor === 'every') {
-        everyRotate();
-      }
-
-      if (response.data.id && properties.constructor === 'scheduled') {
+      if (response.data.id) {
         logScheduledTweet(tweetID, "true", response);
       }
 
@@ -685,18 +700,15 @@ function doTweet(tweet, tweetID, retweetID, replyID) {
     catch (e) {
       Logger.log(e.toString());
       doLog(e, 'n/a', 'Error');
-      if (properties.constructor === 'every' && properties.everyFail === 'skip') {
-        everyRotate();
+
+      if (properties.everyFail === 'skip') {
+        logScheduledTweet(tweetID, "Error", response);
+      } else {
+        //Something went wrong so be sure to try again as soon as possible.
+        setTiming();
       }
-      if (properties.constructor === 'scheduled') {
-        if (properties.everyFail === 'skip') {
-          logScheduledTweet(tweetID, "Error", response);
-        } else {
-          //Something went wrong so be sure to try again as soon as possible.
-          setTiming();
-        }
-      }
-      if (properties.constructor === 'scheduled' && e.toString().includes("Status is a duplicate")) {
+
+      if (e.toString().includes("Status is a duplicate")) {
         logScheduledTweet(tweetID, "Duplicate (Race Condition?)", response);
       }
     }
